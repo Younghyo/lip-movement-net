@@ -25,7 +25,9 @@ import argparse
 from keras.callbacks import ModelCheckpoint, EarlyStopping, TensorBoard
 from keras.utils import to_categorical
 from keras.layers.core import Dense
-from keras.layers import Dropout, Bidirectional, GRU, SimpleRNN
+from keras.layers.wrappers import Bidirectional
+from keras.layers.recurrent import GRU, SimpleRNN
+from keras.layers import Dropout
 from keras.models import Sequential
 from keras.models import load_model
 from keras.optimizers import Adam, RMSprop
@@ -455,6 +457,14 @@ def test_video(video_path, shape_predictor_file, model):
 
     model = load_model(model)
 
+    state = 'Processing'
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    file_result = open("result.txt", "wt")
+
+    frame_num = 0
+    input_sequence = []
     frames = []
     # if video_path is a directory full of frames, read all the frames in from that directory
     if os.path.isdir(video_path):
@@ -462,114 +472,117 @@ def test_video(video_path, shape_predictor_file, model):
         for frame_name in frame_names:
             img = cv2.imread(os.path.join(video_path, frame_name))
             # img = imresize(img, (256, 320))
-            img = cv2.resize(src=img,
-                             dsize=(320, 256),
-                             interpolation=cv2.INTER_CUBIC)
+            # img = cv2.resize(src=img,
+            #            dsize=(256, 320),
+            #            interpolation=cv2.INTER_CUBIC)
+
             frames.append(img)
     else:
         cap = cv2.VideoCapture(video_path)
         while True:
-            ret, img = cap.read()
+            ret, img_org = cap.read()
             if not ret:
                 break
             # img = imresize(img, (256, 320))
-            img = cv2.resize(src=img,
-                             dsize=(320, 256),
-                             interpolation=cv2.INTER_CUBIC)
-            frames.append(img)
 
-    print('Fetched ' + str(len(frames)) + ' frames from the video.')
-    state = 'Processing'
+            # img = cv2.resize(src=img,
+            #                  dsize=(320, 256),
+            #                  interpolation=cv2.INTER_CUBIC)
+            # cv2.imshow('Video', img)
+            # if cv2.waitKey(1) & 0xFF == ord('q'):
+            #     break
 
-    font = cv2.FONT_HERSHEY_SIMPLEX
 
-    frame_num = 0
-    input_sequence = []
-    while True:
-        frame = frames[frame_num]
-        img = frames[frame_num].copy()
+            frame = img_org
+            img = img_org.copy()
 
-        cv2.putText(img, str(frame_num), (2, 10), font, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
+            # cv2.imshow('Video', img)
+            # if cv2.waitKey(1) & 0xFF == ord('q'):
+            #     break
 
-        (dets, facial_points_vector) = get_facial_landmark_vectors_from_frame(frame)
+            cv2.putText(img, str(frame_num), (2, 10), font, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
 
-        if not dets or not facial_points_vector:
-            frame_num += 1
-            # loop back to the beginning of the frame set
-            if frame_num == len(frames):
-                frame_num = 0
-            continue
+            (dets, facial_points_vector) = get_facial_landmark_vectors_from_frame(frame)
 
-        # draw a box showing the detected face
-        for i, d in enumerate(dets):
-            # print("Detection {}: Left: {} Top: {} Right: {} Bottom: {}".format(
-            # 	i, d.left(), d.top(), d.right(), d.bottom()))
+            if not dets or not facial_points_vector:
+                frame_num += 1
+                # loop back to the beginning of the frame set
+                if frame_num == len(frames):
+                    return
+                continue
 
-            cv2.rectangle(img, (d.left(), d.top()), (d.right(), d.bottom()), (0, 255, 0), 2)
-            # draw the state label below the face
-            cv2.rectangle(img, (d.left(), d.bottom()), (d.right(), d.bottom() + 10), (0, 0, 255), cv2.FILLED)
-            cv2.putText(img, state, (d.left() + 2, d.bottom() + 10 - 3), font, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
-
-        cv2.imshow('Video', img)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-        # add the facial points vector to the current input sequence vector for the RNN
-        input_sequence.append(facial_points_vector)
-
-        if len(input_sequence) >= FRAME_SEQ_LEN:
-            # get the most recent N sequences where N=FRAME_SEQ_LEN
-            seq = input_sequence[-1 * FRAME_SEQ_LEN:]
-            f = []
-            for coords in seq:
-                part_61 = (int(coords[2 * 61]), int(coords[2 * 61 + 1]))
-                part_67 = (int(coords[2 * 67]), int(coords[2 * 67 + 1]))
-                part_62 = (int(coords[2 * 62]), int(coords[2 * 62 + 1]))
-                part_66 = (int(coords[2 * 66]), int(coords[2 * 66 + 1]))
-                part_63 = (int(coords[2 * 63]), int(coords[2 * 63 + 1]))
-                part_65 = (int(coords[2 * 65]), int(coords[2 * 65 + 1]))
-
-                A = dist(part_61, part_67)
-                B = dist(part_62, part_66)
-                C = dist(part_63, part_65)
-
-                avg_gap = (A + B + C) / 3.0
-
-                f.append([avg_gap])
-
-            scaler = MinMaxScaler()
-            arr = scaler.fit_transform(f)
-
-            X_data = np.array([arr])
-
-            # y_pred is already categorized
-            y_pred = model.predict_on_batch(X_data)
-
-            # print('y_pred=' + str(y_pred) + ' shape=' + str(y_pred.shape))
-
-            # convert y_pred from categorized continuous to single label
-            y_pred_max = y_pred[0].argmax()
-            print('y_pred=' + str(y_pred) + ' y_pred_max=' + str(y_pred_max))
-
-            for k in CLASS_HASH:
-                if y_pred_max == CLASS_HASH[k]:
-                    state = k;
-                    break
-
-            # redraw the label
+            # draw a box showing the detected face
             for i, d in enumerate(dets):
+                # print("Detection {}: Left: {} Top: {} Right: {} Bottom: {}".format(
+                # 	i, d.left(), d.top(), d.right(), d.bottom()))
+
+                cv2.rectangle(img, (d.left(), d.top()), (d.right(), d.bottom()), (0, 255, 0), 2)
                 # draw the state label below the face
                 cv2.rectangle(img, (d.left(), d.bottom()), (d.right(), d.bottom() + 10), (0, 0, 255), cv2.FILLED)
                 cv2.putText(img, state, (d.left() + 2, d.bottom() + 10 - 3), font, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
 
-            cv2.imshow('Video', img)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            # cv2.imshow('Video', img)
+            # if cv2.waitKey(1) & 0xFF == ord('q'):
+            #     break
 
-        frame_num += 1
-        # loop back to the beginning of the frame set
-        if frame_num == len(frames):
-            frame_num = 0
+            # add the facial points vector to the current input sequence vector for the RNN
+            input_sequence.append(facial_points_vector)
+
+            if len(input_sequence) >= FRAME_SEQ_LEN:
+                # get the most recent N sequences where N=FRAME_SEQ_LEN
+                seq = input_sequence[-1 * FRAME_SEQ_LEN:]
+                f = []
+                for coords in seq:
+                    part_61 = (int(coords[2 * 61]), int(coords[2 * 61 + 1]))
+                    part_67 = (int(coords[2 * 67]), int(coords[2 * 67 + 1]))
+                    part_62 = (int(coords[2 * 62]), int(coords[2 * 62 + 1]))
+                    part_66 = (int(coords[2 * 66]), int(coords[2 * 66 + 1]))
+                    part_63 = (int(coords[2 * 63]), int(coords[2 * 63 + 1]))
+                    part_65 = (int(coords[2 * 65]), int(coords[2 * 65 + 1]))
+
+                    A = dist(part_61, part_67)
+                    B = dist(part_62, part_66)
+                    C = dist(part_63, part_65)
+
+                    avg_gap = (A + B + C) / 3.0
+
+                    f.append([avg_gap])
+
+                scaler = MinMaxScaler()
+                arr = scaler.fit_transform(f)
+
+                X_data = np.array([arr])
+
+                # y_pred is already categorized
+                y_pred = model.predict_on_batch(X_data)
+
+                # print('y_pred=' + str(y_pred) + ' shape=' + str(y_pred.shape))
+
+                # convert y_pred from categorized continuous to single label
+                y_pred_max = y_pred[0].argmax()
+                print('y_pred=' + str(y_pred) + ' y_pred_max=' + str(y_pred_max))
+
+                for k in CLASS_HASH:
+                    if y_pred_max == CLASS_HASH[k]:
+                        state = k;
+                        break
+
+                # redraw the label
+                for i, d in enumerate(dets):
+                    # draw the state label below the face
+                    cv2.rectangle(img, (d.left(), d.bottom()), (d.right(), d.bottom() + 10), (0, 0, 255), cv2.FILLED)
+                    cv2.putText(img, state, (d.left() + 2, d.bottom() + 10 - 3), font, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
+                    file_result.write(f"{frame_num}, {i}, {d}, {state}\n")
+
+
+                # cv2.imshow('Video', img)
+                # if cv2.waitKey(1) & 0xFF == ord('q'):
+                #     break
+
+            frame_num += 1
+            # loop back to the beginning of the frame set
+            if frame_num == len(frames):
+                return
 
 
 def get_facial_landmark_vectors_from_frame(frame):
