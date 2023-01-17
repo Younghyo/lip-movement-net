@@ -25,9 +25,7 @@ import argparse
 from keras.callbacks import ModelCheckpoint, EarlyStopping, TensorBoard
 from keras.utils import to_categorical
 from keras.layers.core import Dense
-from keras.layers.wrappers import Bidirectional
-from keras.layers.recurrent import GRU, SimpleRNN
-from keras.layers import Dropout
+from keras.layers import Dropout, Bidirectional, GRU, SimpleRNN
 from keras.models import Sequential
 from keras.models import load_model
 from keras.optimizers import Adam, RMSprop
@@ -42,7 +40,6 @@ from progressbar import ETA, Percentage, RotatingMarker
 
 import os
 import numpy as np
-from scipy.misc import imresize
 
 import cv2
 import dlib
@@ -464,7 +461,10 @@ def test_video(video_path, shape_predictor_file, model):
         frame_names = sorted(os.listdir(video_path))
         for frame_name in frame_names:
             img = cv2.imread(os.path.join(video_path, frame_name))
-            img = imresize(img, (256, 320))
+            # img = imresize(img, (256, 320))
+            img = cv2.resize(src=img,
+                             dsize=(320, 256),
+                             interpolation=cv2.INTER_CUBIC)
             frames.append(img)
     else:
         cap = cv2.VideoCapture(video_path)
@@ -472,7 +472,10 @@ def test_video(video_path, shape_predictor_file, model):
             ret, img = cap.read()
             if not ret:
                 break
-            img = imresize(img, (256, 320))
+            # img = imresize(img, (256, 320))
+            img = cv2.resize(src=img,
+                             dsize=(320, 256),
+                             interpolation=cv2.INTER_CUBIC)
             frames.append(img)
 
     print('Fetched ' + str(len(frames)) + ' frames from the video.')
