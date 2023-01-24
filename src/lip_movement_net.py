@@ -42,13 +42,16 @@ from progressbar import ETA, Percentage, RotatingMarker
 
 import os
 import numpy as np
-from scipy.misc import imresize
+#from scipy.misc import imresize
 
 import cv2
 import dlib
 import math
 import csv
 
+import pathlib
+
+last_fid = 0
 np.random.seed(int(time.time()))
 
 # Add keys to this hash for supporting other action classes. e.g. CLASS_HASH = {'other': 0, 'speech': 1, 'chew': 2, 'laugh': 3}
@@ -451,8 +454,30 @@ def test(dataset_path, num_rnn_layers=1, num_neurons_in_rnn_layer=32, is_bidirec
 
     return [precision, recall, f1, roc_auc]
 
+import tqdm
+import time
 
-def test_video(video_path, shape_predictor_file, model):
+LOC_LEFT = 0
+LOC_TOP = 1
+LOC_RIGHT = 2
+LOC_BOTTOM = 3
+
+def cut_off_range(image, location) -> None:
+    """Adjust the location area to not exceed the boundary limit."""
+    #pdb.set_trace()
+    location[LOC_TOP] = min(location[LOC_TOP], image.shape[0] - 1)
+    location[LOC_BOTTOM] = min(location[LOC_BOTTOM], image.shape[0] - 1)
+    location[LOC_LEFT] = min(location[LOC_LEFT], image.shape[1] - 1)
+    location[LOC_RIGHT] = min(location[LOC_RIGHT], image.shape[1] - 1)
+    location[LOC_TOP] = max(location[LOC_TOP], 0)
+    location[LOC_BOTTOM] = max(location[LOC_BOTTOM], 0)
+    location[LOC_LEFT] = max(location[LOC_LEFT], 0)
+    location[LOC_RIGHT] = max(location[LOC_RIGHT], 0)
+
+def similar(box1, box2):
+    return max([abs(a-b) for a, b in zip(box1, box2)]) < 100
+
+def test_video(video_path, shape_predictor_file, model, prefix):
     global shape_predictor
     shape_predictor = dlib.shape_predictor(shape_predictor_file)
 
@@ -464,120 +489,192 @@ def test_video(video_path, shape_predictor_file, model):
         frame_names = sorted(os.listdir(video_path))
         for frame_name in frame_names:
             img = cv2.imread(os.path.join(video_path, frame_name))
-            img = imresize(img, (256, 320))
+            #img = imresize(img, (256, 320))
             frames.append(img)
     else:
+        file_embeddings = open(f"embeddings.{prefix}.txt", "wt")
+        file_result = open(f"result.{prefix}.txt", "wt")
+        state = 'Processing'
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        frame_num = 0
+
+        input_sequences = {}
+        last_thread_id = 0
+
         cap = cv2.VideoCapture(video_path)
+        length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        pbar = tqdm.tqdm(total=length)
         while True:
+            t20 = time.time()
             ret, img = cap.read()
             if not ret:
                 break
-            img = imresize(img, (256, 320))
-            frames.append(img)
+            secs = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            #print('21', time.time()-t20)
+            pbar.update(1)
+            #img = imresize(img, (256, 320))
+            # frames.append(img)
 
-    print('Fetched ' + str(len(frames)) + ' frames from the video.')
-    state = 'Processing'
+        # while True:
+            #print(frame_num)
+            frame = img
+            # img = frames[frame_num].copy()
 
-    font = cv2.FONT_HERSHEY_SIMPLEX
+            # cv2.putText(img, str(frame_num), (2, 10), font, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
 
-    frame_num = 0
-    input_sequence = []
-    while True:
-        frame = frames[frame_num]
-        img = frames[frame_num].copy()
 
-        cv2.putText(img, str(frame_num), (2, 10), font, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
+            ####################################################################################################### temp
+            (dets, facial_points_vectors, embeddings, bboxes, fids) = get_facial_landmark_vectors_from_frame(frame, file_embeddings, frame_num, secs, prefix)
 
-        (dets, facial_points_vector) = get_facial_landmark_vectors_from_frame(frame)
+            if not dets:
+                frame_num += 1
+                continue
 
-        if not dets or not facial_points_vector:
-            frame_num += 1
-            # loop back to the beginning of the frame set
-            if frame_num == len(frames):
-                frame_num = 0
-            continue
+            #print('22', time.time()-t20)
 
-        # draw a box showing the detected face
-        for i, d in enumerate(dets):
-            # print("Detection {}: Left: {} Top: {} Right: {} Bottom: {}".format(
-            # 	i, d.left(), d.top(), d.right(), d.bottom()))
+            # draw a box showing the detected face
+            #for i, d in enumerate(dets):
+                # print("Detection {}: Left: {} Top: {} Right: {} Bottom: {}".format(
+                # 	i, d.left(), d.top(), d.right(), d.bottom()))
 
-            cv2.rectangle(img, (d.left(), d.top()), (d.right(), d.bottom()), (0, 255, 0), 2)
-            # draw the state label below the face
-            cv2.rectangle(img, (d.left(), d.bottom()), (d.right(), d.bottom() + 10), (0, 0, 255), cv2.FILLED)
-            cv2.putText(img, state, (d.left() + 2, d.bottom() + 10 - 3), font, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
-
-        cv2.imshow('Video', img)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-        # add the facial points vector to the current input sequence vector for the RNN
-        input_sequence.append(facial_points_vector)
-
-        if len(input_sequence) >= FRAME_SEQ_LEN:
-            # get the most recent N sequences where N=FRAME_SEQ_LEN
-            seq = input_sequence[-1 * FRAME_SEQ_LEN:]
-            f = []
-            for coords in seq:
-                part_61 = (int(coords[2 * 61]), int(coords[2 * 61 + 1]))
-                part_67 = (int(coords[2 * 67]), int(coords[2 * 67 + 1]))
-                part_62 = (int(coords[2 * 62]), int(coords[2 * 62 + 1]))
-                part_66 = (int(coords[2 * 66]), int(coords[2 * 66 + 1]))
-                part_63 = (int(coords[2 * 63]), int(coords[2 * 63 + 1]))
-                part_65 = (int(coords[2 * 65]), int(coords[2 * 65 + 1]))
-
-                A = dist(part_61, part_67)
-                B = dist(part_62, part_66)
-                C = dist(part_63, part_65)
-
-                avg_gap = (A + B + C) / 3.0
-
-                f.append([avg_gap])
-
-            scaler = MinMaxScaler()
-            arr = scaler.fit_transform(f)
-
-            X_data = np.array([arr])
-
-            # y_pred is already categorized
-            y_pred = model.predict_on_batch(X_data)
-
-            # print('y_pred=' + str(y_pred) + ' shape=' + str(y_pred.shape))
-
-            # convert y_pred from categorized continuous to single label
-            y_pred_max = y_pred[0].argmax()
-            print('y_pred=' + str(y_pred) + ' y_pred_max=' + str(y_pred_max))
-
-            for k in CLASS_HASH:
-                if y_pred_max == CLASS_HASH[k]:
-                    state = k;
-                    break
-
-            # redraw the label
-            for i, d in enumerate(dets):
+                #cv2.rectangle(img, (d.left(), d.top()), (d.right(), d.bottom()), (0, 255, 0), 2)
                 # draw the state label below the face
-                cv2.rectangle(img, (d.left(), d.bottom()), (d.right(), d.bottom() + 10), (0, 0, 255), cv2.FILLED)
-                cv2.putText(img, state, (d.left() + 2, d.bottom() + 10 - 3), font, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
+                #cv2.rectangle(img, (d.left(), d.bottom()), (d.right(), d.bottom() + 10), (0, 0, 255), cv2.FILLED)
+                #cv2.putText(img, state, (d.left() + 2, d.bottom() + 10 - 3), font, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
 
-            cv2.imshow('Video', img)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            #cv2.imshow('Video', img)
+            #if cv2.waitKey(1) & 0xFF == ord('q'):
+                #break
 
-        frame_num += 1
-        # loop back to the beginning of the frame set
-        if frame_num == len(frames):
-            frame_num = 0
+            # add the facial points vector to the current input sequence vector for the RNN
+            
+            input_sequences_new = {}
+            for bbox, facial_points_vector, fid_new in zip(bboxes, facial_points_vectors, fids):
+                if not facial_points_vector:
+                    continue
+
+                added = False
+                for fid_prev, (thread_id, bbox_ref, input_sequence) in input_sequences.items():
+                    if similar(bbox_ref, bbox):
+                        input_sequence.append(facial_points_vector)
+                        input_sequences_new[fid_new] = (thread_id, bbox_ref, input_sequence)
+                        added = True
+                        break
+                if not added:
+                    input_sequences_new[fid_new] = (last_thread_id, bbox, [facial_points_vector])
+                    last_thread_id += 1
+            input_sequences = input_sequences_new
+
+            for fid, (thread_id, _, input_sequence)  in input_sequences.items():
+                if len(input_sequence) >= FRAME_SEQ_LEN:
+                    # get the most recent N sequences where N=FRAME_SEQ_LEN
+                    seq = input_sequence[-1 * FRAME_SEQ_LEN:]
+                    f = []
+                    for coords in seq:
+                        part_61 = (int(coords[2 * 61]), int(coords[2 * 61 + 1]))
+                        part_67 = (int(coords[2 * 67]), int(coords[2 * 67 + 1]))
+                        part_62 = (int(coords[2 * 62]), int(coords[2 * 62 + 1]))
+                        part_66 = (int(coords[2 * 66]), int(coords[2 * 66 + 1]))
+                        part_63 = (int(coords[2 * 63]), int(coords[2 * 63 + 1]))
+                        part_65 = (int(coords[2 * 65]), int(coords[2 * 65 + 1]))
+
+                        A = dist(part_61, part_67)
+                        B = dist(part_62, part_66)
+                        C = dist(part_63, part_65)
+
+                        avg_gap = (A + B + C) / 3.0
+
+                        f.append([avg_gap])
+
+                    scaler = MinMaxScaler()
+                    arr = scaler.fit_transform(f)
+
+                    X_data = np.array([arr])
+
+                    # y_pred is already categorized
+                    y_pred = model.predict_on_batch(X_data)
+                    #print('i10', t11-t10)
+                    #print('23', time.time()-t20)
+
+                    # print('y_pred=' + str(y_pred) + ' shape=' + str(y_pred.shape))
+
+                    # convert y_pred from categorized continuous to single label
+                    y_pred_max = y_pred[0].argmax()
+                    #print('y_pred=' + str(y_pred) + ' y_pred_max=' + str(y_pred_max))
+
+                    for k in CLASS_HASH:
+                        if y_pred_max == CLASS_HASH[k]:
+                            state = k
+                            break
+
+                    file_result.write(f"{frame_num}, {state}, {fid}, {secs}, {thread_id}\n")
+
+            frame_num += 1
+
+import pdb
+import jsonpickle
+import requests
+from PIL import Image
+import io
+def get_facial_landmark_vectors_from_frame(frame, file_embeddings, frame_num, secs, prefix):
+    global last_fid
+    t1 = time.time()
+    #print('Fetching face detections and landmarks...')
+    #dets = detector(frame, 1)
+    image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    #print('i1-1', time.time()-t1)
 
 
-def get_facial_landmark_vectors_from_frame(frame):
-    print('Fetching face detections and landmarks...')
-    dets = detector(frame, 1)
+    image_pil = Image.fromarray(image_rgb)
+    binary_image = io.BytesIO()
+    image_pil.save(binary_image, format="JPEG")
+    val_binary_image = binary_image.getvalue()
+
+    data = {"image": val_binary_image}
+    data = jsonpickle.encode(data)
+    #print('i1-1', time.time()-t1)
+    response = requests.post('http://127.0.0.1:10002/', json=data)
+    response = jsonpickle.decode(response.text)
+    face_detection_recognition = response['face_detection_recognition']
+
+    def too_tilted(fdr):    
+        dist_eyes = np.linalg.norm(fdr["landmark"][0] - fdr["landmark"][1])
+        dist_eye_to_mouth = np.linalg.norm(fdr["landmark"][0] - fdr["landmark"][3])
+        return dist_eyes < dist_eye_to_mouth * 0.3
+
+    face_detection_recognition = [fdr for fdr in face_detection_recognition if not too_tilted(fdr)]
+
+    bboxes = [[int(rec['bbox'][0]), int(rec['bbox'][1]), int(rec['bbox'][2]), int(rec['bbox'][3])] for rec in face_detection_recognition]
+    embeddings = [rec['normed_embedding'].tolist() for rec in face_detection_recognition]
+    fids = []
+
+    for embedding, bbox in zip(embeddings, bboxes):
+        file_embeddings.write(f"[{frame_num}, {secs}, {bbox}, {embedding}]\n")
+        cut_off_range(frame, bbox)
+        img_face = frame[bbox[LOC_TOP] : bbox[LOC_BOTTOM], bbox[LOC_LEFT] : bbox[LOC_RIGHT]]
+        filename = f"faces.{prefix}/{last_fid}.jpg"
+        pathlib.Path(filename).parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(filename, img_face)
+        fids.append(last_fid)
+        last_fid += 1
+
+    dets = dlib.rectangles()
+    for bbox in bboxes:
+        dets.append(dlib.rectangle(bbox[0], bbox[1], bbox[2], bbox[3]))
+
     if dets is None:
         print('no detections')
-        return (None, None)
+        return (None, None, None, None, None)
+    t2 = time.time()
+    #print('i1', t2-t1)
+    #pdb.set_trace()
     # assume only 1 face per frame
+    
     facial_points = []
     for k, d in enumerate(dets):
+        facial_points_per_face = []
         shape = shape_predictor(frame, d)
         if shape is None:
             continue
@@ -585,14 +682,15 @@ def get_facial_landmark_vectors_from_frame(frame):
         for i in np.arange(0, 68):
             part = shape.part(i)
             # mouth_points.append((part2.x, part2.y))
-            facial_points.append(part.x)
-            facial_points.append(part.y)
+            facial_points_per_face.append(part.x)
+            facial_points_per_face.append(part.y)
 
-        if len(facial_points) > 0:
-            break
+        facial_points.append(facial_points_per_face)
 
-    print('Returning ('+str(len(dets)) + ', ' + str(len(facial_points)) + ')')
-    return (dets, facial_points)
+    #print('Returning ('+str(len(dets)) + ', ' + str(len(facial_points)) + ')')
+    t3 = time.time()
+    #print('i2', t3-t2)
+    return (dets, facial_points, embeddings, bboxes, fids)
 
 
 def dist(p1, p2):
@@ -729,6 +827,8 @@ if __name__ == '__main__':
                     help="shape predictor file")
     ap.add_argument("-m", "--model", required=False,
                     help="shape model file")
+    ap.add_argument("-f", "--prefix", required=False,
+                    help="shape model file")
 
     args = vars(ap.parse_args())
 
@@ -753,5 +853,5 @@ if __name__ == '__main__':
         exit(0)
 
     if args['shape_predictor'] and args['video_file'] and args['model']:
-        test_video(args['video_file'], args['shape_predictor'], args['model'])
+        test_video(args['video_file'], args['shape_predictor'], args['model'], args['prefix'])
         exit(0)
